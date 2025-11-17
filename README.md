@@ -11,11 +11,15 @@ local Character = Player.Character or Player.CharacterAdded:Wait()
 local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
 local Humanoid = Character:WaitForChild("Humanoid")
 
-local ATTACK_RANGE = 20
+local ATTACK_RANGE = 100
 local ATTACK_SPEED = 0.01
-local BEHIND_DISTANCE = 6.5
+local BEHIND_DISTANCE = 5
+local FRONT_DISTANCE = 5
 local HEIGHT_OFFSET = 2.5
 local HEALTH_THRESHOLD = 80
+local SAFE_MODE_THRESHOLD = 25
+local SAFE_MODE_RECOVER = 70
+local SAFE_HEIGHT = 100
 
 local isRunning = false
 local currentTarget = nil
@@ -23,6 +27,13 @@ local autoCollectEnabled = false
 local autoHeal = false
 local autoRetry = false
 local uiVisible = true
+local safeMode = false
+local safeModeEnabled = true
+local currentMonsterIndex = 1
+local allMonsters = {}
+local originalPosition = nil
+local attackPosition = "behind" -- "behind" หรือ "front"
+local lastPositionSwitch = tick()
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "AutoFarmUI"
@@ -33,8 +44,8 @@ ScreenGui.Parent = PlayerGui
 
 local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
-MainFrame.Size = UDim2.new(0, 420, 0, 520)
-MainFrame.Position = UDim2.new(0.5, -210, 0.5, -260)
+MainFrame.Size = UDim2.new(0, 420, 0, 600)
+MainFrame.Position = UDim2.new(0.5, -210, 0.5, -300)
 MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
 MainFrame.BorderSizePixel = 0
 MainFrame.ClipsDescendants = true
@@ -100,7 +111,6 @@ local TitleOverlayCorner = Instance.new("UICorner")
 TitleOverlayCorner.CornerRadius = UDim.new(0, 16)
 TitleOverlayCorner.Parent = TitleOverlay
 
--- ระบบลาก UI หลัก
 local dragging = false
 local dragInput, mousePos, framePos
 
@@ -182,7 +192,7 @@ local SubtitleLabel = Instance.new("TextLabel")
 SubtitleLabel.Size = UDim2.new(1, -140, 0, 20)
 SubtitleLabel.Position = UDim2.new(0, 70, 0, 42)
 SubtitleLabel.BackgroundTransparency = 1
-SubtitleLabel.Text = "Premium Edition v2.0"
+SubtitleLabel.Text = "Premium Edition v2.1"
 SubtitleLabel.TextColor3 = Color3.fromRGB(150, 200, 255)
 SubtitleLabel.TextSize = 13
 SubtitleLabel.Font = Enum.Font.Gotham
@@ -230,10 +240,62 @@ CloseButton.MouseLeave:Connect(function()
     TweenService:Create(CloseStroke, TweenInfo.new(0.2), {Transparency = 0.7}):Play()
 end)
 
+-- Status Display
+local StatusFrame = Instance.new("Frame")
+StatusFrame.Name = "StatusFrame"
+StatusFrame.Size = UDim2.new(1, -30, 0, 80)
+StatusFrame.Position = UDim2.new(0, 15, 0, 85)
+StatusFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+StatusFrame.BorderSizePixel = 0
+StatusFrame.Parent = MainFrame
+
+local StatusCorner = Instance.new("UICorner")
+StatusCorner.CornerRadius = UDim.new(0, 12)
+StatusCorner.Parent = StatusFrame
+
+local StatusStroke = Instance.new("UIStroke")
+StatusStroke.Color = Color3.fromRGB(100, 255, 100)
+StatusStroke.Thickness = 2
+StatusStroke.Transparency = 0.6
+StatusStroke.Parent = StatusFrame
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, -20, 0, 25)
+StatusLabel.Position = UDim2.new(0, 10, 0, 10)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "🛡 Status: Normal Mode"
+StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+StatusLabel.TextSize = 16
+StatusLabel.Font = Enum.Font.GothamBold
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.Parent = StatusFrame
+
+local HealthLabel = Instance.new("TextLabel")
+HealthLabel.Size = UDim2.new(1, -20, 0, 20)
+HealthLabel.Position = UDim2.new(0, 10, 0, 35)
+HealthLabel.BackgroundTransparency = 1
+HealthLabel.Text = "❤ Health: 100%"
+HealthLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+HealthLabel.TextSize = 14
+HealthLabel.Font = Enum.Font.Gotham
+HealthLabel.TextXAlignment = Enum.TextXAlignment.Left
+HealthLabel.Parent = StatusFrame
+
+local TargetLabel = Instance.new("TextLabel")
+TargetLabel.Size = UDim2.new(1, -20, 0, 20)
+TargetLabel.Position = UDim2.new(0, 10, 0, 55)
+TargetLabel.BackgroundTransparency = 1
+TargetLabel.Text = "🎯 Target: None"
+TargetLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TargetLabel.TextSize = 14
+TargetLabel.Font = Enum.Font.Gotham
+TargetLabel.TextXAlignment = Enum.TextXAlignment.Left
+TargetLabel.Parent = StatusFrame
+
 local Container = Instance.new("ScrollingFrame")
 Container.Name = "Container"
-Container.Size = UDim2.new(1, -30, 1, -95)
-Container.Position = UDim2.new(0, 15, 0, 85)
+Container.Size = UDim2.new(1, -30, 1, -180)
+Container.Position = UDim2.new(0, 15, 0, 180)
 Container.BackgroundTransparency = 1
 Container.BorderSizePixel = 0
 Container.ScrollBarThickness = 8
@@ -493,7 +555,6 @@ local function createSlider(name, icon, color, min, max, default, callback)
     return Slider
 end
 
--- ปุ่มเปิดปิด UI ที่ปรับปรุงแล้ว
 local ToggleButton = Instance.new("TextButton")
 ToggleButton.Name = "ToggleButton"
 ToggleButton.Size = UDim2.new(0, 65, 0, 65)
@@ -524,7 +585,6 @@ ToggleGradient.Color = ColorSequence.new{
 ToggleGradient.Rotation = 45
 ToggleGradient.Parent = ToggleButton
 
--- ไอคอนสำหรับเปิด
 local OpenIcon = Instance.new("TextLabel")
 OpenIcon.Size = UDim2.new(1, 0, 1, 0)
 OpenIcon.BackgroundTransparency = 1
@@ -535,7 +595,6 @@ OpenIcon.Font = Enum.Font.GothamBold
 OpenIcon.Visible = false
 OpenIcon.Parent = ToggleButton
 
--- ไอคอนสำหรับปิด
 local CloseIcon = Instance.new("TextLabel")
 CloseIcon.Size = UDim2.new(1, 0, 1, 0)
 CloseIcon.BackgroundTransparency = 1
@@ -580,18 +639,15 @@ end)
 ToggleButton.MouseButton1Click:Connect(function()
     uiVisible = not uiVisible
     
-    -- หมุนปุ่ม
     TweenService:Create(ToggleButton, TweenInfo.new(0.3, Enum.EasingStyle.Back), {Rotation = ToggleButton.Rotation + 180}):Play()
     
     if uiVisible then
-        -- แสดง UI หลัก
         OpenIcon.Visible = false
         CloseIcon.Visible = true
         MainFrame.Visible = true
         TweenService:Create(MainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Size = UDim2.new(0, 420, 0, 520)
+            Size = UDim2.new(0, 420, 0, 600)
         }):Play()
-        -- เปลี่ยนสีปุ่ม
         TweenService:Create(ToggleButton, TweenInfo.new(0.3), {
             BackgroundColor3 = Color3.fromRGB(30, 50, 30)
         }):Play()
@@ -599,7 +655,6 @@ ToggleButton.MouseButton1Click:Connect(function()
             Color = Color3.fromRGB(100, 255, 100)
         }):Play()
     else
-        -- ซ่อน UI หลัก
         OpenIcon.Visible = true
         CloseIcon.Visible = false
         TweenService:Create(MainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
@@ -607,7 +662,6 @@ ToggleButton.MouseButton1Click:Connect(function()
         }):Play()
         wait(0.3)
         MainFrame.Visible = false
-        -- เปลี่ยนสีปุ่มกลับ
         TweenService:Create(ToggleButton, TweenInfo.new(0.3), {
             BackgroundColor3 = Color3.fromRGB(30, 30, 45)
         }):Play()
@@ -639,6 +693,8 @@ createToggle("Auto Farm", "⚔", Color3.fromRGB(100, 200, 255), function(enabled
     isRunning = enabled
     if not enabled then
         currentTarget = nil
+        currentMonsterIndex = 1
+        allMonsters = {}
     end
 end)
 
@@ -652,6 +708,13 @@ end)
 
 createToggle("Auto Retry", "🔄", Color3.fromRGB(150, 255, 150), function(enabled)
     autoRetry = enabled
+end)
+
+createToggle("Safe Mode", "🛡", Color3.fromRGB(255, 150, 50), function(enabled)
+    safeModeEnabled = enabled
+    if not enabled then
+        safeMode = false
+    end
 end)
 
 createSlider("Health Threshold", "💊", Color3.fromRGB(255, 100, 150), 1, 100, HEALTH_THRESHOLD, function(value)
@@ -698,17 +761,18 @@ local function findAllMonsters()
     return monsters
 end
 
-local function findNearestMonster()
-    local nearestMonster = nil
-    local shortestDistance = math.huge
-    for _, mob in pairs(findAllMonsters()) do
-        local distance = (HumanoidRootPart.Position - mob.HumanoidRootPart.Position).Magnitude
-        if distance < shortestDistance then
-            shortestDistance = distance
-            nearestMonster = mob
-        end
+local function getNextMonster()
+    allMonsters = findAllMonsters()
+    if #allMonsters == 0 then
+        return nil
     end
-    return nearestMonster
+    
+    currentMonsterIndex = currentMonsterIndex + 1
+    if currentMonsterIndex > #allMonsters then
+        currentMonsterIndex = 1
+    end
+    
+    return allMonsters[currentMonsterIndex]
 end
 
 local function attackMonster()
@@ -719,6 +783,7 @@ local function attackMonster()
             local monsterPos = monsterHRP.Position
             local playerPos = HumanoidRootPart.Position
             local direction = (monsterPos - playerPos).Unit
+            
             local mobService = ReplicatedStorage:FindFirstChild("ReplicatedStorage")
             if mobService then
                 mobService = mobService:FindFirstChild("Packages")
@@ -741,6 +806,7 @@ local function attackMonster()
                     end
                 end
             end
+            
             pcall(function()
                 local knit = require(ReplicatedStorage.ReplicatedStorage.Packages.Knit)
                 local attackService = knit.GetService("AttackService")
@@ -753,6 +819,7 @@ local function attackMonster()
                     attackService:UseAbility("Slot_M1", mouseData)
                 end
             end)
+            
             for _, tool in pairs(Character:GetChildren()) do
                 if tool:IsA("Tool") then
                     pcall(function()
@@ -772,14 +839,45 @@ local function teleportBehindMonster(monster)
         local monsterHRP = monster.HumanoidRootPart
         local monsterPos = monsterHRP.Position
         local monsterCFrame = monsterHRP.CFrame
-        local behindOffset = monsterCFrame.LookVector * -BEHIND_DISTANCE
-        local targetPos = monsterPos + behindOffset + Vector3.new(0, HEIGHT_OFFSET, 0)
+        
+        -- สลับตำแหน่งระหว่างหน้าและหลัง
+        local currentTime = tick()
+        if currentTime - lastPositionSwitch >= 0.5 then -- สลับทุก 0.5 วินาที
+            if attackPosition == "behind" then
+                attackPosition = "front"
+            else
+                attackPosition = "behind"
+            end
+            lastPositionSwitch = currentTime
+        end
+        
+        local offset
+        if attackPosition == "behind" then
+            offset = monsterCFrame.LookVector * -BEHIND_DISTANCE
+        else
+            offset = monsterCFrame.LookVector * FRONT_DISTANCE
+        end
+        
+        local targetPos = monsterPos + offset + Vector3.new(0, HEIGHT_OFFSET, 0)
         local targetCFrame = CFrame.new(targetPos, monsterPos)
+        
         HumanoidRootPart.CFrame = targetCFrame
         HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
         HumanoidRootPart.RotVelocity = Vector3.new(0, 0, 0)
     end)
     return true
+end
+
+local function teleportToSafeZone()
+    pcall(function()
+        if not originalPosition then
+            originalPosition = HumanoidRootPart.Position
+        end
+        local safePos = Vector3.new(originalPosition.X, originalPosition.Y + SAFE_HEIGHT, originalPosition.Z)
+        HumanoidRootPart.CFrame = CFrame.new(safePos)
+        HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
+        HumanoidRootPart.RotVelocity = Vector3.new(0, 0, 0)
+    end)
 end
 
 local function disableAnimations()
@@ -849,8 +947,37 @@ local function getHealthPercent()
 end
 
 task.spawn(function()
+    while task.wait(0.5) do
+        local healthPercent = getHealthPercent()
+        HealthLabel.Text = "❤ Health: " .. math.floor(healthPercent) .. "%"
+        
+        if safeModeEnabled then
+            if healthPercent <= SAFE_MODE_THRESHOLD and not safeMode then
+                safeMode = true
+                currentTarget = nil
+                teleportToSafeZone()
+                StatusLabel.Text = "🛡 Status: SAFE MODE - Low Health!"
+                StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+                StatusStroke.Color = Color3.fromRGB(255, 100, 100)
+            elseif healthPercent >= SAFE_MODE_RECOVER and safeMode then
+                safeMode = false
+                StatusLabel.Text = "🛡 Status: Normal Mode"
+                StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+                StatusStroke.Color = Color3.fromRGB(100, 255, 100)
+            end
+        end
+        
+        if currentTarget then
+            TargetLabel.Text = "🎯 Target: " .. currentTarget.Name .. " (" .. currentMonsterIndex .. "/" .. #allMonsters .. ")"
+        else
+            TargetLabel.Text = "🎯 Target: Searching..."
+        end
+    end
+end)
+
+task.spawn(function()
     while task.wait(1) do
-        if autoHeal and isRunning then
+        if autoHeal and isRunning and not safeMode then
             local healthPercent = getHealthPercent()
             if healthPercent <= HEALTH_THRESHOLD then
                 pcall(function()
@@ -914,20 +1041,24 @@ task.spawn(function()
 end)
 
 RunService.Heartbeat:Connect(function()
-    if not isRunning then return end
+    if not isRunning or safeMode then return end
     pcall(function()
         Character = Player.Character
         if not Character then return end
         HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
         Humanoid = Character:FindFirstChild("Humanoid")
         if not HumanoidRootPart or not Humanoid then return end
+        
         setupNoClip()
         disableAnimations()
+        
         if not currentTarget or not currentTarget.Parent or 
            not currentTarget:FindFirstChild("Humanoid") or 
            currentTarget.Humanoid.Health <= 0 then
-            currentTarget = findNearestMonster()
+            currentTarget = getNextMonster()
+            task.wait(0.5)
         end
+        
         if currentTarget and canAttack then
             teleportBehindMonster(currentTarget)
             lockOnTarget(currentTarget)
@@ -937,7 +1068,7 @@ end)
 
 task.spawn(function()
     while task.wait(ATTACK_SPEED) do
-        if isRunning and currentTarget and canAttack then
+        if isRunning and currentTarget and canAttack and not safeMode then
             attackMonster()
         end
     end
@@ -949,4 +1080,7 @@ Player.CharacterAdded:Connect(function(newChar)
     HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
     Humanoid = newChar:WaitForChild("Humanoid")
     currentTarget = nil
+    currentMonsterIndex = 1
+    allMonsters = {}
+    safeMode = false
 end)
