@@ -1,3 +1,29 @@
+_G.AutoFarmConfig = _G.AutoFarmConfig or {
+    -- ระยะทาง
+    ATTACK_RANGE = 100,
+    BEHIND_DISTANCE = 5,
+    FRONT_DISTANCE = 5,
+    HEIGHT_OFFSET = 2.5,
+    SAFE_HEIGHT = 100,
+    
+    -- เลือดและความปลอดภัย
+    HEALTH_THRESHOLD = 80,
+    SAFE_MODE_THRESHOLD = 25,
+    SAFE_MODE_RECOVER = 70,
+    
+    -- ความเร็ว
+    ATTACK_SPEED = 0.01,
+    
+    -- เปิด/ปิดระบบอัตโนมัติ
+    AUTO_FARM = true,
+    AUTO_COLLECT = true,
+    AUTO_HEAL = true,
+    AUTO_RETRY = true,
+    SAFE_MODE = true,
+}
+
+
+
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -11,29 +37,30 @@ local Character = Player.Character or Player.CharacterAdded:Wait()
 local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
 local Humanoid = Character:WaitForChild("Humanoid")
 
-local ATTACK_RANGE = 100
-local ATTACK_SPEED = 0.01
-local BEHIND_DISTANCE = 5
-local FRONT_DISTANCE = 5
-local HEIGHT_OFFSET = 2.5
-local HEALTH_THRESHOLD = 80
-local SAFE_MODE_THRESHOLD = 25
-local SAFE_MODE_RECOVER = 70
-local SAFE_HEIGHT = 100
+local ATTACK_RANGE = _G.AutoFarmConfig.ATTACK_RANGE
+local ATTACK_SPEED = _G.AutoFarmConfig.ATTACK_SPEED
+local BEHIND_DISTANCE = _G.AutoFarmConfig.BEHIND_DISTANCE
+local FRONT_DISTANCE = _G.AutoFarmConfig.FRONT_DISTANCE
+local HEIGHT_OFFSET = _G.AutoFarmConfig.HEIGHT_OFFSET
+local HEALTH_THRESHOLD = _G.AutoFarmConfig.HEALTH_THRESHOLD
+local SAFE_MODE_THRESHOLD = _G.AutoFarmConfig.SAFE_MODE_THRESHOLD
+local SAFE_MODE_RECOVER = _G.AutoFarmConfig.SAFE_MODE_RECOVER
+local SAFE_HEIGHT = _G.AutoFarmConfig.SAFE_HEIGHT
 
-local isRunning = false
+local isRunning = _G.AutoFarmConfig.AUTO_FARM
 local currentTarget = nil
-local autoCollectEnabled = false
-local autoHeal = false
-local autoRetry = false
+local autoCollectEnabled = _G.AutoFarmConfig.AUTO_COLLECT
+local autoHeal = _G.AutoFarmConfig.AUTO_HEAL
+local autoRetry = _G.AutoFarmConfig.AUTO_RETRY
 local uiVisible = true
 local safeMode = false
-local safeModeEnabled = true
+local safeModeEnabled = _G.AutoFarmConfig.SAFE_MODE
 local currentMonsterIndex = 1
 local allMonsters = {}
 local originalPosition = nil
 local attackPosition = "behind" -- "behind" หรือ "front"
 local lastPositionSwitch = tick()
+local safePlatform = nil
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "AutoFarmUI"
@@ -946,6 +973,7 @@ local function getHealthPercent()
     return 100
 end
 
+-- แก้ไขส่วนตรวจสอบ Health
 task.spawn(function()
     while task.wait(0.5) do
         local healthPercent = getHealthPercent()
@@ -954,13 +982,27 @@ task.spawn(function()
         if safeModeEnabled then
             if healthPercent <= SAFE_MODE_THRESHOLD and not safeMode then
                 safeMode = true
+                isRunning = false -- ปิด Auto Farm
                 currentTarget = nil
                 teleportToSafeZone()
-                StatusLabel.Text = "🛡 Status: SAFE MODE - Low Health!"
+                StatusLabel.Text = "🛡 Status: SAFE MODE - Healing!"
                 StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
                 StatusStroke.Color = Color3.fromRGB(255, 100, 100)
+                
+                -- เริ่ม Auto Heal
+                task.spawn(function()
+                    while safeMode and healthPercent < SAFE_MODE_RECOVER do
+                        pcall(function()
+                            ReplicatedStorage:WaitForChild("ReplicatedStorage"):WaitForChild("Packages"):WaitForChild("Knit"):WaitForChild("Services"):WaitForChild("HealingService"):WaitForChild("RF"):WaitForChild("UseHeal"):InvokeServer()
+                        end)
+                        task.wait(1)
+                        healthPercent = getHealthPercent()
+                    end
+                end)
+                
             elseif healthPercent >= SAFE_MODE_RECOVER and safeMode then
                 safeMode = false
+                removeSafePlatform() -- ลบ platform
                 StatusLabel.Text = "🛡 Status: Normal Mode"
                 StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
                 StatusStroke.Color = Color3.fromRGB(100, 255, 100)
@@ -973,6 +1015,18 @@ task.spawn(function()
             TargetLabel.Text = "🎯 Target: Searching..."
         end
     end
+end)
+-- เพิ่มการลบ platform เมื่อตัวละครตาย
+Player.CharacterAdded:Connect(function(newChar)
+    Character = newChar
+    task.wait(0.5)
+    HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
+    Humanoid = newChar:WaitForChild("Humanoid")
+    currentTarget = nil
+    currentMonsterIndex = 1
+    allMonsters = {}
+    safeMode = false
+    removeSafePlatform() -- ลบ platform เมื่อ respawn
 end)
 
 task.spawn(function()
@@ -1084,3 +1138,50 @@ Player.CharacterAdded:Connect(function(newChar)
     allMonsters = {}
     safeMode = false
 end)
+local function createSafePlatform()
+    if safePlatform and safePlatform.Parent then
+        return safePlatform
+    end
+    
+    local platform = Instance.new("Part")
+    platform.Name = "SafePlatform"
+    platform.Size = Vector3.new(20, 1, 20)
+    platform.Anchored = true
+    platform.CanCollide = true
+    platform.Transparency = 0.5
+    platform.Material = Enum.Material.ForceField
+    platform.BrickColor = BrickColor.new("Bright blue")
+    platform.Parent = Workspace
+    
+    safePlatform = platform
+    return platform
+end
+
+local function teleportToSafeZone()
+    pcall(function()
+        if not originalPosition then
+            originalPosition = HumanoidRootPart.Position
+        end
+        
+        -- สร้าง platform
+        local platform = createSafePlatform()
+        
+        -- ตั้งตำแหน่ง platform
+        local safePos = Vector3.new(originalPosition.X, originalPosition.Y + SAFE_HEIGHT, originalPosition.Z)
+        platform.Position = safePos
+        
+        -- วาร์ปผู้เล่นไปยืนบน platform
+        HumanoidRootPart.CFrame = CFrame.new(safePos + Vector3.new(0, 2, 0))
+        HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
+        HumanoidRootPart.RotVelocity = Vector3.new(0, 0, 0)
+    end)
+end
+
+local function removeSafePlatform()
+    pcall(function()
+        if safePlatform and safePlatform.Parent then
+            safePlatform:Destroy()
+            safePlatform = nil
+        end
+    end)
+end
