@@ -12,7 +12,7 @@ _G.AutoFarmConfig = _G.AutoFarmConfig or {
     SAFE_MODE_RECOVER = 70,
     
     -- ความเร็ว
-    ATTACK_SPEED = 0.01,
+    ATTACK_SPEED = 0.5,
     
     -- เปิด/ปิดระบบอัตโนมัติ
     AUTO_FARM = true,
@@ -21,8 +21,6 @@ _G.AutoFarmConfig = _G.AutoFarmConfig or {
     AUTO_RETRY = true,
     SAFE_MODE = true,
 }
-
-
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -58,9 +56,278 @@ local safeModeEnabled = _G.AutoFarmConfig.SAFE_MODE
 local currentMonsterIndex = 1
 local allMonsters = {}
 local originalPosition = nil
-local attackPosition = "behind" -- "behind" หรือ "front"
+local attackPosition = "behind"
 local lastPositionSwitch = tick()
 local safePlatform = nil
+local safePlatformPosition = nil
+
+-- =============================================
+-- UTILITY FUNCTIONS (ประกาศก่อนใช้งาน)
+-- =============================================
+
+local function getHealthPercent()
+    local success, result = pcall(function()
+        local healthBar = PlayerGui:FindFirstChild("Main")
+        if healthBar then
+            healthBar = healthBar:FindFirstChild("PlayerBar")
+            if healthBar then
+                healthBar = healthBar:FindFirstChild("Main")
+                if healthBar then
+                    healthBar = healthBar:FindFirstChild("HealthBar")
+                    if healthBar then
+                        healthBar = healthBar:FindFirstChild("Amount")
+                        if healthBar then
+                            local healthText = healthBar.Text
+                            local current, max = healthText:match("(%d+)/(%d+)")
+                            if current and max then
+                                local currentNum = tonumber(current)
+                                local maxNum = tonumber(max)
+                                if currentNum and maxNum and maxNum > 0 then
+                                    return (currentNum / maxNum) * 100
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return 100
+    end)
+    if success and result then
+        return result
+    end
+    return 100
+end
+
+local function createSafePlatform()
+    pcall(function()
+        if safePlatform and safePlatform.Parent then
+            safePlatform:Destroy()
+        end
+        
+        local platform = Instance.new("Part")
+        platform.Name = "SafePlatform"
+        platform.Size = Vector3.new(20, 1, 20)
+        platform.Anchored = true
+        platform.CanCollide = true
+        platform.Transparency = 0.3
+        platform.Material = Enum.Material.ForceField
+        platform.BrickColor = BrickColor.new("Bright blue")
+        
+        -- บันทึกตำแหน่งปัจจุบันถ้ายังไม่มี
+        if not safePlatformPosition then
+            safePlatformPosition = HumanoidRootPart.Position + Vector3.new(0, SAFE_HEIGHT, 0)
+        end
+        
+        platform.Position = safePlatformPosition
+        platform.Parent = Workspace
+        
+        safePlatform = platform
+    end)
+    return safePlatform
+end
+
+local function removeSafePlatform()
+    pcall(function()
+        if safePlatform and safePlatform.Parent then
+            safePlatform:Destroy()
+            safePlatform = nil
+        end
+    end)
+end
+
+local function teleportToSafeZone()
+    pcall(function()
+        if not originalPosition then
+            originalPosition = HumanoidRootPart.Position
+        end
+        
+        -- สร้าง platform ที่ตำแหน่งเดิม หรือตำแหน่งที่บันทึกไว้
+        local platform = createSafePlatform()
+        
+        if platform then
+            -- วาร์ปผู้เล่นไปยืนบน platform
+            local standPos = platform.Position + Vector3.new(0, 3, 0)
+            HumanoidRootPart.CFrame = CFrame.new(standPos)
+            HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
+            HumanoidRootPart.RotVelocity = Vector3.new(0, 0, 0)
+        end
+    end)
+end
+
+local function disableAnimations()
+    pcall(function()
+        for _, track in pairs(Humanoid:GetPlayingAnimationTracks()) do
+            track:Stop()
+        end
+    end)
+end
+
+local function setupNoClip()
+    pcall(function()
+        for _, part in pairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+    end)
+end
+
+local function collectAllDrops()
+    if not autoCollectEnabled then return end
+    task.spawn(function()
+        pcall(function()
+            local cameraDrops = Workspace.Camera:FindFirstChild("Drops")
+            if not cameraDrops then return end
+            for _, drop in pairs(cameraDrops:GetChildren()) do
+                if drop.Name == "Drop" and drop:FindFirstChild("Center") then
+                    local center = drop.Center
+                    local prompt = center:FindFirstChildOfClass("ProximityPrompt")
+                    if prompt then
+                        fireproximityprompt(prompt, 0)
+                    end
+                end
+            end
+        end)
+    end)
+end
+
+local function findAllMonsters()
+    local monsters = {}
+    if not Workspace:FindFirstChild("Mobs") then
+        return monsters
+    end
+    for _, mob in pairs(Workspace.Mobs:GetChildren()) do
+        if mob:FindFirstChild("Humanoid") and mob.Humanoid.Health > 0 and mob:FindFirstChild("HumanoidRootPart") then
+            table.insert(monsters, mob)
+        end
+    end
+    return monsters
+end
+
+local function getNextMonster()
+    allMonsters = findAllMonsters()
+    if #allMonsters == 0 then
+        return nil
+    end
+    
+    currentMonsterIndex = currentMonsterIndex + 1
+    if currentMonsterIndex > #allMonsters then
+        currentMonsterIndex = 1
+    end
+    
+    return allMonsters[currentMonsterIndex]
+end
+
+local function lockOnTarget(monster)
+    if not monster or not monster:FindFirstChild("HumanoidRootPart") then
+        return
+    end
+    pcall(function()
+        local monsterPos = monster.HumanoidRootPart.Position
+        local currentPos = HumanoidRootPart.Position
+        HumanoidRootPart.CFrame = CFrame.new(
+            currentPos,
+            Vector3.new(monsterPos.X, currentPos.Y, monsterPos.Z)
+        )
+    end)
+end
+
+local function teleportBehindMonster(monster)
+    if not monster or not monster:FindFirstChild("HumanoidRootPart") then
+        return false
+    end
+    pcall(function()
+        local monsterHRP = monster.HumanoidRootPart
+        local monsterPos = monsterHRP.Position
+        local monsterCFrame = monsterHRP.CFrame
+        
+        local currentTime = tick()
+        if currentTime - lastPositionSwitch >= 0.5 then
+            if attackPosition == "behind" then
+                attackPosition = "front"
+            else
+                attackPosition = "behind"
+            end
+            lastPositionSwitch = currentTime
+        end
+        
+        local offset
+        if attackPosition == "behind" then
+            offset = monsterCFrame.LookVector * -BEHIND_DISTANCE
+        else
+            offset = monsterCFrame.LookVector * FRONT_DISTANCE
+        end
+        
+        local targetPos = monsterPos + offset + Vector3.new(0, HEIGHT_OFFSET, 0)
+        local targetCFrame = CFrame.new(targetPos, monsterPos)
+        
+        HumanoidRootPart.CFrame = targetCFrame
+        HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
+        HumanoidRootPart.RotVelocity = Vector3.new(0, 0, 0)
+    end)
+    return true
+end
+
+local function attackMonster()
+    if not currentTarget or not currentTarget:FindFirstChild("HumanoidRootPart") then return end
+    task.spawn(function()
+        pcall(function()
+            local monsterHRP = currentTarget.HumanoidRootPart
+            local monsterPos = monsterHRP.Position
+            local playerPos = HumanoidRootPart.Position
+            local direction = (monsterPos - playerPos).Unit
+            
+            local mobService = ReplicatedStorage:FindFirstChild("ReplicatedStorage")
+            if mobService then
+                mobService = mobService:FindFirstChild("Packages")
+                if mobService then
+                    mobService = mobService:FindFirstChild("Knit")
+                    if mobService then
+                        mobService = mobService:FindFirstChild("Services")
+                        if mobService then
+                            mobService = mobService:FindFirstChild("MobService")
+                            if mobService then
+                                local signal = mobService:FindFirstChild("AttackVFXSignal")
+                                if signal then
+                                    signal:Fire("SwordHit", monsterPos, {
+                                        Player = Player,
+                                        Direction = direction
+                                    })
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            
+            pcall(function()
+                local knit = require(ReplicatedStorage.ReplicatedStorage.Packages.Knit)
+                local attackService = knit.GetService("AttackService")
+                if attackService then
+                    local mouseData = {
+                        Hit = monsterPos,
+                        Target = monsterHRP,
+                        Origin = playerPos
+                    }
+                    attackService:UseAbility("Slot_M1", mouseData)
+                end
+            end)
+            
+            for _, tool in pairs(Character:GetChildren()) do
+                if tool:IsA("Tool") then
+                    pcall(function()
+                        tool:Activate()
+                    end)
+                end
+            end
+        end)
+    end)
+end
+
+-- =============================================
+-- UI CREATION
+-- =============================================
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "AutoFarmUI"
@@ -219,7 +486,7 @@ local SubtitleLabel = Instance.new("TextLabel")
 SubtitleLabel.Size = UDim2.new(1, -140, 0, 20)
 SubtitleLabel.Position = UDim2.new(0, 70, 0, 42)
 SubtitleLabel.BackgroundTransparency = 1
-SubtitleLabel.Text = "Premium Edition v2.1"
+SubtitleLabel.Text = "Premium Edition v2.2 - Fixed"
 SubtitleLabel.TextColor3 = Color3.fromRGB(150, 200, 255)
 SubtitleLabel.TextSize = 13
 SubtitleLabel.Font = Enum.Font.Gotham
@@ -267,7 +534,6 @@ CloseButton.MouseLeave:Connect(function()
     TweenService:Create(CloseStroke, TweenInfo.new(0.2), {Transparency = 0.7}):Play()
 end)
 
--- Status Display
 local StatusFrame = Instance.new("Frame")
 StatusFrame.Name = "StatusFrame"
 StatusFrame.Size = UDim2.new(1, -30, 0, 80)
@@ -716,6 +982,10 @@ CloseButton.MouseButton1Click:Connect(function()
     }):Play()
 end)
 
+-- =============================================
+-- CREATE TOGGLES AND SLIDERS
+-- =============================================
+
 createToggle("Auto Farm", "⚔", Color3.fromRGB(100, 200, 255), function(enabled)
     isRunning = enabled
     if not enabled then
@@ -741,6 +1011,7 @@ createToggle("Safe Mode", "🛡", Color3.fromRGB(255, 150, 50), function(enabled
     safeModeEnabled = enabled
     if not enabled then
         safeMode = false
+        removeSafePlatform()
     end
 end)
 
@@ -748,25 +1019,11 @@ createSlider("Health Threshold", "💊", Color3.fromRGB(255, 100, 150), 1, 100, 
     HEALTH_THRESHOLD = value
 end)
 
-local function collectAllDrops()
-    if not autoCollectEnabled then return end
-    task.spawn(function()
-        pcall(function()
-            local cameraDrops = Workspace.Camera:FindFirstChild("Drops")
-            if not cameraDrops then return end
-            for _, drop in pairs(cameraDrops:GetChildren()) do
-                if drop.Name == "Drop" and drop:FindFirstChild("Center") then
-                    local center = drop.Center
-                    local prompt = center:FindFirstChildOfClass("ProximityPrompt")
-                    if prompt then
-                        fireproximityprompt(prompt, 0)
-                    end
-                end
-            end
-        end)
-    end)
-end
+-- =============================================
+-- BACKGROUND TASKS
+-- =============================================
 
+-- Auto Collect Loop
 task.spawn(function()
     while task.wait(0.3) do
         if isRunning and autoCollectEnabled then
@@ -775,205 +1032,7 @@ task.spawn(function()
     end
 end)
 
-local function findAllMonsters()
-    local monsters = {}
-    if not Workspace:FindFirstChild("Mobs") then
-        return monsters
-    end
-    for _, mob in pairs(Workspace.Mobs:GetChildren()) do
-        if mob:FindFirstChild("Humanoid") and mob.Humanoid.Health > 0 and mob:FindFirstChild("HumanoidRootPart") then
-            table.insert(monsters, mob)
-        end
-    end
-    return monsters
-end
-
-local function getNextMonster()
-    allMonsters = findAllMonsters()
-    if #allMonsters == 0 then
-        return nil
-    end
-    
-    currentMonsterIndex = currentMonsterIndex + 1
-    if currentMonsterIndex > #allMonsters then
-        currentMonsterIndex = 1
-    end
-    
-    return allMonsters[currentMonsterIndex]
-end
-
-local function attackMonster()
-    if not currentTarget or not currentTarget:FindFirstChild("HumanoidRootPart") then return end
-    task.spawn(function()
-        pcall(function()
-            local monsterHRP = currentTarget.HumanoidRootPart
-            local monsterPos = monsterHRP.Position
-            local playerPos = HumanoidRootPart.Position
-            local direction = (monsterPos - playerPos).Unit
-            
-            local mobService = ReplicatedStorage:FindFirstChild("ReplicatedStorage")
-            if mobService then
-                mobService = mobService:FindFirstChild("Packages")
-                if mobService then
-                    mobService = mobService:FindFirstChild("Knit")
-                    if mobService then
-                        mobService = mobService:FindFirstChild("Services")
-                        if mobService then
-                            mobService = mobService:FindFirstChild("MobService")
-                            if mobService then
-                                local signal = mobService:FindFirstChild("AttackVFXSignal")
-                                if signal then
-                                    signal:Fire("SwordHit", monsterPos, {
-                                        Player = Player,
-                                        Direction = direction
-                                    })
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-            
-            pcall(function()
-                local knit = require(ReplicatedStorage.ReplicatedStorage.Packages.Knit)
-                local attackService = knit.GetService("AttackService")
-                if attackService then
-                    local mouseData = {
-                        Hit = monsterPos,
-                        Target = monsterHRP,
-                        Origin = playerPos
-                    }
-                    attackService:UseAbility("Slot_M1", mouseData)
-                end
-            end)
-            
-            for _, tool in pairs(Character:GetChildren()) do
-                if tool:IsA("Tool") then
-                    pcall(function()
-                        tool:Activate()
-                    end)
-                end
-            end
-        end)
-    end)
-end
-
-local function teleportBehindMonster(monster)
-    if not monster or not monster:FindFirstChild("HumanoidRootPart") then
-        return false
-    end
-    pcall(function()
-        local monsterHRP = monster.HumanoidRootPart
-        local monsterPos = monsterHRP.Position
-        local monsterCFrame = monsterHRP.CFrame
-        
-        -- สลับตำแหน่งระหว่างหน้าและหลัง
-        local currentTime = tick()
-        if currentTime - lastPositionSwitch >= 0.5 then -- สลับทุก 0.5 วินาที
-            if attackPosition == "behind" then
-                attackPosition = "front"
-            else
-                attackPosition = "behind"
-            end
-            lastPositionSwitch = currentTime
-        end
-        
-        local offset
-        if attackPosition == "behind" then
-            offset = monsterCFrame.LookVector * -BEHIND_DISTANCE
-        else
-            offset = monsterCFrame.LookVector * FRONT_DISTANCE
-        end
-        
-        local targetPos = monsterPos + offset + Vector3.new(0, HEIGHT_OFFSET, 0)
-        local targetCFrame = CFrame.new(targetPos, monsterPos)
-        
-        HumanoidRootPart.CFrame = targetCFrame
-        HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
-        HumanoidRootPart.RotVelocity = Vector3.new(0, 0, 0)
-    end)
-    return true
-end
-
-local function teleportToSafeZone()
-    pcall(function()
-        if not originalPosition then
-            originalPosition = HumanoidRootPart.Position
-        end
-        local safePos = Vector3.new(originalPosition.X, originalPosition.Y + SAFE_HEIGHT, originalPosition.Z)
-        HumanoidRootPart.CFrame = CFrame.new(safePos)
-        HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
-        HumanoidRootPart.RotVelocity = Vector3.new(0, 0, 0)
-    end)
-end
-
-local function disableAnimations()
-    pcall(function()
-        for _, track in pairs(Humanoid:GetPlayingAnimationTracks()) do
-            track:Stop()
-        end
-    end)
-end
-
-local function setupNoClip()
-    pcall(function()
-        for _, part in pairs(Character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = false
-            end
-        end
-    end)
-end
-
-local function lockOnTarget(monster)
-    if not monster or not monster:FindFirstChild("HumanoidRootPart") then
-        return
-    end
-    pcall(function()
-        local monsterPos = monster.HumanoidRootPart.Position
-        local currentPos = HumanoidRootPart.Position
-        HumanoidRootPart.CFrame = CFrame.new(
-            currentPos,
-            Vector3.new(monsterPos.X, currentPos.Y, monsterPos.Z)
-        )
-    end)
-end
-
-local function getHealthPercent()
-    local success, result = pcall(function()
-        local healthBar = PlayerGui:FindFirstChild("Main")
-        if healthBar then
-            healthBar = healthBar:FindFirstChild("PlayerBar")
-            if healthBar then
-                healthBar = healthBar:FindFirstChild("Main")
-                if healthBar then
-                    healthBar = healthBar:FindFirstChild("HealthBar")
-                    if healthBar then
-                        healthBar = healthBar:FindFirstChild("Amount")
-                        if healthBar then
-                            local healthText = healthBar.Text
-                            local current, max = healthText:match("(%d+)/(%d+)")
-                            if current and max then
-                                local currentNum = tonumber(current)
-                                local maxNum = tonumber(max)
-                                if currentNum and maxNum and maxNum > 0 then
-                                    return (currentNum / maxNum) * 100
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        return 100
-    end)
-    if success and result then
-        return result
-    end
-    return 100
-end
-
--- แก้ไขส่วนตรวจสอบ Health
+-- Health Monitor and Safe Mode
 task.spawn(function()
     while task.wait(0.5) do
         local healthPercent = getHealthPercent()
@@ -982,27 +1041,26 @@ task.spawn(function()
         if safeModeEnabled then
             if healthPercent <= SAFE_MODE_THRESHOLD and not safeMode then
                 safeMode = true
-                isRunning = false -- ปิด Auto Farm
+                isRunning = false
                 currentTarget = nil
                 teleportToSafeZone()
                 StatusLabel.Text = "🛡 Status: SAFE MODE - Healing!"
                 StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
                 StatusStroke.Color = Color3.fromRGB(255, 100, 100)
                 
-                -- เริ่ม Auto Heal
                 task.spawn(function()
-                    while safeMode and healthPercent < SAFE_MODE_RECOVER do
+                    while safeMode and getHealthPercent() < SAFE_MODE_RECOVER do
                         pcall(function()
                             ReplicatedStorage:WaitForChild("ReplicatedStorage"):WaitForChild("Packages"):WaitForChild("Knit"):WaitForChild("Services"):WaitForChild("HealingService"):WaitForChild("RF"):WaitForChild("UseHeal"):InvokeServer()
                         end)
                         task.wait(1)
-                        healthPercent = getHealthPercent()
                     end
                 end)
                 
             elseif healthPercent >= SAFE_MODE_RECOVER and safeMode then
                 safeMode = false
-                removeSafePlatform() -- ลบ platform
+                removeSafePlatform()
+                safePlatformPosition = nil
                 StatusLabel.Text = "🛡 Status: Normal Mode"
                 StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
                 StatusStroke.Color = Color3.fromRGB(100, 255, 100)
@@ -1016,19 +1074,8 @@ task.spawn(function()
         end
     end
 end)
--- เพิ่มการลบ platform เมื่อตัวละครตาย
-Player.CharacterAdded:Connect(function(newChar)
-    Character = newChar
-    task.wait(0.5)
-    HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
-    Humanoid = newChar:WaitForChild("Humanoid")
-    currentTarget = nil
-    currentMonsterIndex = 1
-    allMonsters = {}
-    safeMode = false
-    removeSafePlatform() -- ลบ platform เมื่อ respawn
-end)
 
+-- Auto Heal Loop
 task.spawn(function()
     while task.wait(1) do
         if autoHeal and isRunning and not safeMode then
@@ -1043,6 +1090,7 @@ task.spawn(function()
     end
 end)
 
+-- Auto Start Dungeon
 local dungeonStarting = false
 task.spawn(function()
     while task.wait(0.5) do
@@ -1066,6 +1114,7 @@ task.spawn(function()
     end
 end)
 
+-- Auto Retry Loop
 task.spawn(function()
     while task.wait(2) do
         if autoRetry then
@@ -1077,6 +1126,7 @@ task.spawn(function()
     end
 end)
 
+-- Can Attack Monitor
 local canAttack = true
 task.spawn(function()
     while task.wait(0.1) do
@@ -1094,6 +1144,7 @@ task.spawn(function()
     end
 end)
 
+-- Main Farm Loop (Heartbeat)
 RunService.Heartbeat:Connect(function()
     if not isRunning or safeMode then return end
     pcall(function()
@@ -1120,6 +1171,7 @@ RunService.Heartbeat:Connect(function()
     end)
 end)
 
+-- Attack Loop
 task.spawn(function()
     while task.wait(ATTACK_SPEED) do
         if isRunning and currentTarget and canAttack and not safeMode then
@@ -1128,6 +1180,7 @@ task.spawn(function()
     end
 end)
 
+-- Character Respawn Handler
 Player.CharacterAdded:Connect(function(newChar)
     Character = newChar
     task.wait(0.5)
@@ -1137,51 +1190,6 @@ Player.CharacterAdded:Connect(function(newChar)
     currentMonsterIndex = 1
     allMonsters = {}
     safeMode = false
+    removeSafePlatform()
+    safePlatformPosition = nil
 end)
-local function createSafePlatform()
-    if safePlatform and safePlatform.Parent then
-        return safePlatform
-    end
-    
-    local platform = Instance.new("Part")
-    platform.Name = "SafePlatform"
-    platform.Size = Vector3.new(20, 1, 20)
-    platform.Anchored = true
-    platform.CanCollide = true
-    platform.Transparency = 0.5
-    platform.Material = Enum.Material.ForceField
-    platform.BrickColor = BrickColor.new("Bright blue")
-    platform.Parent = Workspace
-    
-    safePlatform = platform
-    return platform
-end
-
-local function teleportToSafeZone()
-    pcall(function()
-        if not originalPosition then
-            originalPosition = HumanoidRootPart.Position
-        end
-        
-        -- สร้าง platform
-        local platform = createSafePlatform()
-        
-        -- ตั้งตำแหน่ง platform
-        local safePos = Vector3.new(originalPosition.X, originalPosition.Y + SAFE_HEIGHT, originalPosition.Z)
-        platform.Position = safePos
-        
-        -- วาร์ปผู้เล่นไปยืนบน platform
-        HumanoidRootPart.CFrame = CFrame.new(safePos + Vector3.new(0, 2, 0))
-        HumanoidRootPart.Velocity = Vector3.new(0, 0, 0)
-        HumanoidRootPart.RotVelocity = Vector3.new(0, 0, 0)
-    end)
-end
-
-local function removeSafePlatform()
-    pcall(function()
-        if safePlatform and safePlatform.Parent then
-            safePlatform:Destroy()
-            safePlatform = nil
-        end
-    end)
-end
